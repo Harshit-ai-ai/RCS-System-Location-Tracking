@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.Telephony
 import android.telephony.SmsMessage
 import com.family.safetysms.auth.AuthManager
+import com.family.safetysms.contacts.TrustedContactsManager
 
 class SmsReceiver : BroadcastReceiver() {
 
@@ -26,21 +27,26 @@ class SmsReceiver : BroadcastReceiver() {
                 SmsMessage.createFromPdu(pdu as ByteArray)
             }
 
+            val sender = message.originatingAddress ?: continue
+
+            // 🚫 Ignore untrusted numbers
+            if (!TrustedContactsManager.isTrusted(context, sender)) {
+                continue
+            }
+
             val body = message.messageBody
                 ?.trim()
                 ?.replace(Regex("\\s+"), " ")
                 ?: continue
 
-            val sender = message.originatingAddress ?: continue
-
-            // Step 1: LOC command
+            // Step 1️⃣ LOC command
             if (body.equals("LOC", ignoreCase = true)) {
                 AuthManager.startAuth(sender, context)
                 abortBroadcast()
                 return
             }
 
-            // Step 2: AUTH <code>
+            // Step 2️⃣ AUTH <code>
             if (body.startsWith("AUTH", ignoreCase = true)) {
                 val parts = body.split(" ")
 

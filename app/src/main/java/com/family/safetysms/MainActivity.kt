@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.provider.ContactsContract
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -15,14 +16,18 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.family.safetysms.contacts.TrustedContactsManager
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var startButton: Button
+    private lateinit var addContactButton: Button
 
     private val REQ_SMS = 101
     private val REQ_LOCATION = 102
+    private val REQ_CONTACT = 103
+    private val PICK_CONTACT = 201
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,11 +35,16 @@ class MainActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.statusText)
         startButton = findViewById(R.id.startButton)
+        addContactButton = findViewById(R.id.addContactButton)
 
         updateStatus()
 
         startButton.setOnClickListener {
             startProtectionFlow()
+        }
+
+        addContactButton.setOnClickListener {
+            addTrustedContact()
         }
 
         onBackPressedDispatcher.addCallback(
@@ -47,29 +57,72 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    // 🔐 Guided protection flow
     private fun startProtectionFlow() {
-        if (!hasSmsPermission()) {
-            explainSmsPermission()
-            return
+        when {
+            !hasSmsPermission() -> explainSmsPermission()
+            !hasLocationPermission() -> explainLocationPermission()
+            else -> explainBatteryOptimization()
         }
+    }
 
-        if (!hasLocationPermission()) {
-            explainLocationPermission()
-            return
+    // 📇 Add trusted contact
+    private fun addTrustedContact() {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.READ_CONTACTS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.READ_CONTACTS),
+                REQ_CONTACT
+            )
+        } else {
+            pickContact()
         }
+    }
 
-        explainBatteryOptimization()
+    private fun pickContact() {
+        val intent = Intent(Intent.ACTION_PICK).apply {
+            type = ContactsContract.CommonDataKinds.Phone.CONTENT_TYPE
+        }
+        startActivityForResult(intent, PICK_CONTACT)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == PICK_CONTACT && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val cursor = contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                null, null, null
+            )
+
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val number = it.getString(0)
+                    TrustedContactsManager.addNumber(this, number)
+                    Toast.makeText(
+                        this,
+                        "Trusted contact added",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
     }
 
     private fun explainSmsPermission() {
         AlertDialog.Builder(this)
-            .setTitle("SMS Access Needed")
+            .setTitle("SMS Permission Needed")
             .setMessage(
-                "This allows your phone to read a special emergency message " +
-                        "sent by your family.\n\n" +
-                        "Without this, we cannot respond to them."
+                "This lets your family send an emergency request.\n\n" +
+                        "Only safety messages are read."
             )
-            .setPositiveButton("Continue") { _, _ ->
+            .setPositiveButton("Allow") { _, _ ->
                 ActivityCompat.requestPermissions(
                     this,
                     arrayOf(
@@ -85,12 +138,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun explainLocationPermission() {
         AlertDialog.Builder(this)
-            .setTitle("Location Access Needed")
+            .setTitle("Location Permission Needed")
             .setMessage(
-                "This allows your family to find you if you are lost or need help.\n\n" +
-                        "Your location is shared ONLY when they request it."
+                "This helps your family find you if needed.\n\n" +
+                        "Location is shared ONLY on request."
             )
-            .setPositiveButton("Continue") { _, _ ->
+            .setPositiveButton("Allow") { _, _ ->
                 ActivityCompat.requestPermissions(
                     this,
                     arrayOf(
@@ -107,31 +160,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun explainBatteryOptimization() {
         AlertDialog.Builder(this)
-            .setTitle("Final Important Step")
+            .setTitle("Final Step")
             .setMessage(
-                "Android may stop this app to save battery.\n\n" +
-                        "Please allow it to run all the time so it works in emergencies."
+                "Please allow this app to run always.\n\n" +
+                        "This ensures it works during emergencies."
             )
             .setPositiveButton("Allow") { _, _ ->
                 requestIgnoreBatteryOptimizations()
-                Toast.makeText(
-                    this,
-                    "Protection is now active",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(this, "Protection ACTIVE", Toast.LENGTH_LONG).show()
                 updateStatus()
             }
             .setCancelable(false)
             .show()
     }
 
-    private fun hasSmsPermission(): Boolean =
+    private fun hasSmsPermission() =
         ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECEIVE_SMS
         ) == PackageManager.PERMISSION_GRANTED
 
-    private fun hasLocationPermission(): Boolean =
+    private fun hasLocationPermission() =
         ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION
@@ -140,30 +189,29 @@ class MainActivity : AppCompatActivity() {
     private fun requestIgnoreBatteryOptimizations() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            val intent = Intent(
-                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                Uri.parse("package:$packageName")
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
             )
-            startActivity(intent)
         }
     }
 
     private fun updateStatus() {
-        val sms = if (hasSmsPermission()) "✔" else "✖"
-        val loc = if (hasLocationPermission()) "✔" else "✖"
+        val sms = if (hasSmsPermission()) "✔ SMS Access" else "✖ SMS Access"
+        val loc = if (hasLocationPermission()) "✔ Location Access" else "✖ Location Access"
 
         statusText.text =
-            "$sms SMS Access\n" +
-                    "$loc Location Access\n\n" +
-                    "Send 'LOC' from a trusted number to request location"
+            "$sms\n$loc\n\n" +
+                    "Only trusted contacts can request your location"
     }
 
     private fun showExitWarning() {
         AlertDialog.Builder(this)
             .setTitle("Exit Safety App?")
             .setMessage(
-                "This app protects you in emergencies.\n\n" +
-                        "Closing it may stop SMS-based location sharing."
+                "Closing this app may stop emergency protection."
             )
             .setPositiveButton("Exit") { _, _ -> finish() }
             .setNegativeButton("Keep Running", null)
@@ -180,7 +228,7 @@ class MainActivity : AppCompatActivity() {
         if (grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
             Toast.makeText(
                 this,
-                "Permission denied. Protection is incomplete.",
+                "Permission denied. Protection incomplete.",
                 Toast.LENGTH_LONG
             ).show()
         }
